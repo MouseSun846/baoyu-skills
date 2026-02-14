@@ -102,6 +102,7 @@ async function get_free_port(): Promise<number> {
         return;
       }
       const port = addr.port;
+      console.log('port=',port)
       srv.close((err) => (err ? reject(err) : resolve(port)));
     });
   });
@@ -172,7 +173,6 @@ async function launch_chrome(profileDir: string, port: number): Promise<ChildPro
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-popup-blocking',
-    'https://gemini.google.com/app',
   ];
 
   return spawn(chrome, args, { stdio: 'ignore' });
@@ -215,14 +215,46 @@ async function fetch_google_cookies_via_cdp(
   let cdp: CdpConnection | null = null;
   try {
     const wsUrl = await wait_for_chrome_debug_port(port, 30_000);
+    verbose = true;
+    if (verbose) logger.info(`[CDP] Connected to debug port, wsUrl: ${wsUrl}`);
     cdp = await CdpConnection.connect(wsUrl, 15_000);
 
-    const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', {
-      url: 'https://gemini.google.com/app',
-      newWindow: true,
+    const { targetInfos } = await cdp.send<{ targetInfos: Array<{ targetId: string; type: string }> }>('Target.getTargets');
+    if (verbose) logger.info(`[CDP] Found ${targetInfos.length} targets: ${targetInfos.map((t) => t.type).join(', ')}`);
+    const pageTarget = targetInfos.find((t) => t.type === 'page');
+    if (!pageTarget) throw new Error('No page target found');
+    if (verbose) logger.info(`[CDP] Using page target: ${pageTarget.targetId}`);
+
+    const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', {
+      targetId: pageTarget.targetId,
+      flatten: true,
     });
-    const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
+    if (verbose) logger.info(`[CDP] Attached to session: ${sessionId}`);
     await cdp.send('Network.enable', {}, { sessionId });
+    await cdp.send('Page.enable', {}, { sessionId });
+
+    if (verbose) logger.info('[CDP] Navigating to https://gemini.google.com/app...');
+    await cdp.send('Page.navigate', { url: 'https://gemini.google.com/app' }, { sessionId });
+
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        if (verbose) logger.info('[CDP] Page load timeout, continuing anyway...');
+        resolve();
+      }, 30_000);
+      const handler = (event: MessageEvent) => {
+        try {
+          const data = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data as ArrayBuffer);
+          const msg = JSON.parse(data) as { method?: string; sessionId?: string };
+          if (msg.method === 'Page.loadEventFired' && msg.sessionId === sessionId) {
+            clearTimeout(timer);
+            cdp.ws.removeEventListener('message', handler);
+            if (verbose) logger.info('[CDP] Page load event fired');
+            resolve();
+          }
+        } catch {}
+      };
+      cdp.ws.addEventListener('message', handler);
+    });
 
     if (verbose) {
       logger.info('Chrome opened. If needed, complete Google login in the window. Waiting for a valid Gemini session...');
@@ -238,13 +270,17 @@ async function fetch_google_cookies_via_cdp(
         { sessionId, timeoutMs: 10_000 },
       );
 
+      if (verbose) logger.info(`[CDP] Got ${cookies.length} cookies: ${cookies.map((c) => c.name).join(', ')}`);
+
       const m: CookieMap = {};
       for (const c of cookies) {
         if (c?.name && typeof c.value === 'string') m[c.name] = c.value;
       }
 
       last = m;
-      if (await is_gemini_session_ready(m, verbose)) {
+      const ready = await is_gemini_session_ready(m, verbose);
+      if (verbose) logger.info(`[CDP] Session ready check: ${ready}`);
+      if (ready) {
         return m;
       }
 

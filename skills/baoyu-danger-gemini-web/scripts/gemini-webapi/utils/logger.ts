@@ -9,11 +9,11 @@ const lvl: Record<Exclude<LogLevel, number>, number> = {
   CRITICAL: 5,
 };
 
-let cur = lvl.INFO;
+let cur = lvl.TRACE;
 
 function toNum(level: LogLevel): number {
   if (typeof level === 'number') return level;
-  return lvl[level] ?? lvl.INFO;
+  return lvl[level] ?? lvl.TRACE;
 }
 
 export function set_log_level(level: LogLevel): void {
@@ -23,12 +23,9 @@ export function set_log_level(level: LogLevel): void {
 export const setLogLevel = set_log_level;
 
 function emit(level: Exclude<LogLevel, number>, args: unknown[]): void {
-  if (lvl[level] < cur) return;
-  const prefix = `[gemini_webapi] ${level}:`;
 
-  if (level === 'WARNING') console.warn(prefix, ...args);
-  else if (level === 'ERROR' || level === 'CRITICAL') console.error(prefix, ...args);
-  else console.log(prefix, ...args);
+  const prefix = `[gemini_webapi] ${level}:`;
+  console.log(prefix, ...args);
 }
 
 export const logger = {
